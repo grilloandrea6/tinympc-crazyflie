@@ -39,6 +39,7 @@ extern "C" {
 #include <string.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <math.h>
 
 #include "app.h"
 #include "config.h"
@@ -79,17 +80,37 @@ static inline struct vec quat2rp(struct quat q) {
 #define DEBUG_MODULE "TINYMPC-E"
 #include "debug.h"
 
+// Benchmark-only mode: run synthetic MPC solves in init and keep motors off.
+#define TINYMPC_BENCH_ONLY 1
+#define BENCH_TARGET_RATE_HZ 500
+#define BENCH_SOLVES_PER_POINT 80
+#define BENCH_CHUNK_SIZE 1
+#define BENCH_CHUNK_DELAY_MS 200
+#define BENCH_PROGRESS_EVERY 0
+#define BENCH_SWEEP_POINTS 8
+
+static bool benchRequested;
+static bool benchDone;
+static void runSyntheticBenchmarkChunk(const uint32_t chunkSize);
+
 void appMain() {
   DEBUG_PRINT("Waiting for activation ...\n");
 
   while(1) {
-    vTaskDelay(M2T(2000));
+#if TINYMPC_BENCH_ONLY
+    if (benchRequested && !benchDone) {
+      runSyntheticBenchmarkChunk(BENCH_CHUNK_SIZE);
+      vTaskDelay(M2T(BENCH_CHUNK_DELAY_MS));
+      continue;
+    }
+#endif
+    vTaskDelay(M2T(200));
   }
 }
 
 // Macro variables - define locally to avoid dependency issues
 #define DT 0.002f       // dt
-#define NHORIZON 25     // horizon steps (must match constants.h if used)
+#define NHORIZON 10     // horizon steps (must match constants.h if used)
 #define MPC_RATE RATE_100_HZ  // control frequency
 #define LQR_RATE RATE_500_HZ  // control frequency
 
@@ -168,6 +189,136 @@ static struct quat attitude;
 static struct vec phi;
 
 // Basic mode - no obstacle avoidance constraints
+
+static const int benchIterSweep[BENCH_SWEEP_POINTS] = {1, 2, 4, 7, 10, 14, 20, 28};
+
+static int benchPoint = 0;
+static uint32_t benchIterInPoint = 0;
+
+static uint32_t benchMinUs[BENCH_SWEEP_POINTS];
+static uint32_t benchMaxUs[BENCH_SWEEP_POINTS];
+static uint64_t benchSumUs[BENCH_SWEEP_POINTS];
+static uint32_t benchMisses[BENCH_SWEEP_POINTS];
+static uint32_t benchSolved[BENCH_SWEEP_POINTS];
+static uint32_t benchMaxIterReached[BENCH_SWEEP_POINTS];
+static uint32_t benchNonCvx[BENCH_SWEEP_POINTS];
+static uint32_t benchOtherStatus[BENCH_SWEEP_POINTS];
+
+static void runSyntheticBenchmarkChunk(const uint32_t chunkSize) {
+  const uint32_t budget_us = 1000000U / BENCH_TARGET_RATE_HZ;
+  uint32_t chunks = 0;
+
+  while (chunks < chunkSize && benchPoint < BENCH_SWEEP_POINTS) {
+    const uint32_t k = (uint32_t)benchPoint * 100000U + benchIterInPoint;
+    stgs.max_iter = benchIterSweep[benchPoint];
+
+    for (int i = 0; i < NHORIZON; ++i) {
+      const float t = (float)(k + (uint32_t)i) * DT;
+
+      Xref[i].setZero();
+      Xref[i](0) = 0.8f * sinf(1.2f * t);
+      Xref[i](1) = 0.6f * cosf(0.9f * t);
+      Xref[i](2) = 0.5f + 0.15f * sinf(0.7f * t);
+      Xref[i](6) = 0.8f * 1.2f * cosf(1.2f * t);
+      Xref[i](7) = -0.6f * 0.9f * sinf(0.9f * t);
+      Xref[i](8) = 0.15f * 0.7f * cosf(0.7f * t);
+      Xref[i](11) = 0.2f * sinf(0.5f * t);
+
+      if (i < NHORIZON - 1) {
+        Uref[i].setZero();
+      }
+    }
+
+    // Keep warm-start effective while avoiding a trivial fixed-point solve.
+    x0 = Xref[0];
+    x0(0) += 0.08f * sinf(0.13f * (float)k);
+    x0(1) += 0.06f * cosf(0.11f * (float)k);
+    x0(2) += 0.03f * sinf(0.07f * (float)k);
+    x0(6) += 0.10f * cosf(0.17f * (float)k);
+    x0(7) += 0.10f * sinf(0.19f * (float)k);
+
+    tiny_SetInitialState(&work, &x0);
+    tiny_SetStateReference(&work, Xref);
+    tiny_SetInputReference(&work, Uref);
+    tiny_UpdateLinearCost(&work);
+
+    const uint32_t t0 = usecTimestamp();
+    tiny_SolveAdmm(&work);
+    const uint32_t dt_us = usecTimestamp() - t0;
+
+    if (dt_us < benchMinUs[benchPoint]) {
+      benchMinUs[benchPoint] = dt_us;
+    }
+    if (dt_us > benchMaxUs[benchPoint]) {
+      benchMaxUs[benchPoint] = dt_us;
+    }
+    benchSumUs[benchPoint] += dt_us;
+    if (dt_us > budget_us) {
+      benchMisses[benchPoint]++;
+    }
+    if (info.status_val == TINY_SOLVED) {
+      benchSolved[benchPoint]++;
+    } else if (info.status_val == TINY_MAX_ITER_REACHED) {
+      benchMaxIterReached[benchPoint]++;
+    } else if (info.status_val == TINY_NON_CVX) {
+      benchNonCvx[benchPoint]++;
+    } else {
+      benchOtherStatus[benchPoint]++;
+    }
+
+    benchIterInPoint++;
+    chunks++;
+
+    if (BENCH_PROGRESS_EVERY > 0 && (benchIterInPoint % BENCH_PROGRESS_EVERY) == 0) {
+      DEBUG_PRINT("BENCH progress: point=%d/%d iter=%d done=%lu/%d\n",
+                  benchPoint + 1, BENCH_SWEEP_POINTS, stgs.max_iter,
+                  (unsigned long)benchIterInPoint, BENCH_SOLVES_PER_POINT);
+    }
+
+    if (benchIterInPoint >= BENCH_SOLVES_PER_POINT) {
+      const uint32_t avg_us = (uint32_t)(benchSumUs[benchPoint] / BENCH_SOLVES_PER_POINT);
+      DEBUG_PRINT("BENCH point: H=%d iter=%d us[min/avg/max]=%lu/%lu/%lu miss=%lu/%d\n",
+                  NHORIZON, benchIterSweep[benchPoint],
+                  (unsigned long)benchMinUs[benchPoint], (unsigned long)avg_us, (unsigned long)benchMaxUs[benchPoint],
+                  (unsigned long)benchMisses[benchPoint], BENCH_SOLVES_PER_POINT);
+      DEBUG_PRINT("BENCH status: solved=%lu max_iter=%lu noncvx=%lu other=%lu\n",
+                  (unsigned long)benchSolved[benchPoint], (unsigned long)benchMaxIterReached[benchPoint],
+                  (unsigned long)benchNonCvx[benchPoint], (unsigned long)benchOtherStatus[benchPoint]);
+
+      benchPoint++;
+      benchIterInPoint = 0;
+    }
+  }
+
+  if (benchPoint >= BENCH_SWEEP_POINTS) {
+    // Least-squares fit: T_us(iter) = T0 + k_iter * iter, at current NHORIZON.
+    double sum_x = 0.0;
+    double sum_y = 0.0;
+    double sum_xx = 0.0;
+    double sum_xy = 0.0;
+    for (int p = 0; p < BENCH_SWEEP_POINTS; ++p) {
+      const double x = (double)benchIterSweep[p];
+      const double y = (double)(benchSumUs[p] / BENCH_SOLVES_PER_POINT);
+      sum_x += x;
+      sum_y += y;
+      sum_xx += x * x;
+      sum_xy += x * y;
+    }
+    const double n = (double)BENCH_SWEEP_POINTS;
+    const double denom = n * sum_xx - sum_x * sum_x;
+    double k_iter = 0.0;
+    double t0 = 0.0;
+    if (fabs(denom) > 1e-9) {
+      k_iter = (n * sum_xy - sum_x * sum_y) / denom;
+      t0 = (sum_y - k_iter * sum_x) / n;
+    }
+
+    DEBUG_PRINT("BENCH fit: T_us ~= T0 + k_iter*iter @H=%d\n", NHORIZON);
+    DEBUG_PRINT("BENCH fit: T0=%.1f us, k_iter=%.1f us/iter\n", t0, k_iter);
+    DEBUG_PRINT("BENCH fit: k_step_iter=%.3f us/(iter*step)\n", k_iter / (double)NHORIZON);
+    benchDone = true;
+  }
+}
 
 void updateInitialState(const sensorData_t *sensors, const state_t *state) {
   x0(0) = state->position.x;
@@ -289,7 +440,7 @@ void controllerOutOfTreeInit(void) {
   stgs.en_cstr_goal = 0;
   stgs.en_cstr_inputs = 1;
   stgs.en_cstr_states = 0;  // No state constraints for basic test
-  stgs.max_iter = 2;        // Original working value
+  stgs.max_iter = benchIterSweep[0];
   stgs.verbose = 0;
   stgs.check_termination = 0;
   stgs.tol_abs_dual = 5e-2;
@@ -304,8 +455,26 @@ void controllerOutOfTreeInit(void) {
   /* End of MPC initialization */  
   step = 0;  
   traj_iter = 0;
-  
+
+#if TINYMPC_BENCH_ONLY
+  benchRequested = true;
+  benchDone = false;
+  benchPoint = 0;
+  benchIterInPoint = 0;
+  for (int p = 0; p < BENCH_SWEEP_POINTS; ++p) {
+    benchMinUs[p] = 0xFFFFFFFFU;
+    benchMaxUs[p] = 0U;
+    benchSumUs[p] = 0U;
+    benchMisses[p] = 0U;
+    benchSolved[p] = 0U;
+    benchMaxIterReached[p] = 0U;
+    benchNonCvx[p] = 0U;
+    benchOtherStatus[p] = 0U;
+  }
+  DEBUG_PRINT("BENCH_ONLY mode active: motors forced off in controllerOutOfTree()\n");
+#else
   DEBUG_PRINT("Straight line trajectory (1m forward)\n");
+#endif
 }
 
 bool controllerOutOfTreeTest() {
@@ -314,6 +483,19 @@ bool controllerOutOfTreeTest() {
 }
 
 void controllerOutOfTree(control_t *control, const setpoint_t *setpoint, const sensorData_t *sensors, const state_t *state, const uint32_t tick) {
+#if TINYMPC_BENCH_ONLY
+  (void)setpoint;
+  (void)sensors;
+  (void)state;
+  (void)tick;
+  control->normalizedForces[0] = 0.0f;
+  control->normalizedForces[1] = 0.0f;
+  control->normalizedForces[2] = 0.0f;
+  control->normalizedForces[3] = 0.0f;
+  control->controlMode = controlModePWM;
+  return;
+#endif
+
   // Get current time
   startTimestamp = usecTimestamp();
 
