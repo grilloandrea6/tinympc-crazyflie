@@ -87,7 +87,8 @@ static inline struct vec quat2rp(struct quat q) {
 #define BENCH_CHUNK_SIZE 1
 #define BENCH_CHUNK_DELAY_MS 200
 #define BENCH_PROGRESS_EVERY 0
-#define BENCH_SWEEP_POINTS 8
+#define BENCH_H_SWEEP_POINTS 4
+#define BENCH_I_SWEEP_POINTS 8
 
 static bool benchRequested;
 static bool benchDone;
@@ -110,7 +111,7 @@ void appMain() {
 
 // Macro variables - define locally to avoid dependency issues
 #define DT 0.002f       // dt
-#define NHORIZON 10     // horizon steps (must match constants.h if used)
+#define NHORIZON 50     // horizon steps (must match constants.h if used)
 #define MPC_RATE RATE_100_HZ  // control frequency
 #define LQR_RATE RATE_500_HZ  // control frequency
 
@@ -190,29 +191,40 @@ static struct vec phi;
 
 // Basic mode - no obstacle avoidance constraints
 
-static const int benchIterSweep[BENCH_SWEEP_POINTS] = {1, 2, 4, 7, 10, 14, 20, 28};
+static const int benchHSweep[BENCH_H_SWEEP_POINTS] = {10, 20, 30, 40};
+static const int benchIterSweep[BENCH_I_SWEEP_POINTS] = {1, 2, 4, 7, 10, 14, 20, 28};
 
-static int benchPoint = 0;
+static int benchHPoint = 0;
+static int benchIPoint = 0;
 static uint32_t benchIterInPoint = 0;
 
-static uint32_t benchMinUs[BENCH_SWEEP_POINTS];
-static uint32_t benchMaxUs[BENCH_SWEEP_POINTS];
-static uint64_t benchSumUs[BENCH_SWEEP_POINTS];
-static uint32_t benchMisses[BENCH_SWEEP_POINTS];
-static uint32_t benchSolved[BENCH_SWEEP_POINTS];
-static uint32_t benchMaxIterReached[BENCH_SWEEP_POINTS];
-static uint32_t benchNonCvx[BENCH_SWEEP_POINTS];
-static uint32_t benchOtherStatus[BENCH_SWEEP_POINTS];
+static uint32_t benchMinUs[BENCH_H_SWEEP_POINTS][BENCH_I_SWEEP_POINTS];
+static uint32_t benchMaxUs[BENCH_H_SWEEP_POINTS][BENCH_I_SWEEP_POINTS];
+static uint64_t benchSumUs[BENCH_H_SWEEP_POINTS][BENCH_I_SWEEP_POINTS];
+static uint32_t benchMisses[BENCH_H_SWEEP_POINTS][BENCH_I_SWEEP_POINTS];
+static uint32_t benchSolved[BENCH_H_SWEEP_POINTS][BENCH_I_SWEEP_POINTS];
+static uint32_t benchMaxIterReached[BENCH_H_SWEEP_POINTS][BENCH_I_SWEEP_POINTS];
+static uint32_t benchNonCvx[BENCH_H_SWEEP_POINTS][BENCH_I_SWEEP_POINTS];
+static uint32_t benchOtherStatus[BENCH_H_SWEEP_POINTS][BENCH_I_SWEEP_POINTS];
 
 static void runSyntheticBenchmarkChunk(const uint32_t chunkSize) {
   const uint32_t budget_us = 1000000U / BENCH_TARGET_RATE_HZ;
   uint32_t chunks = 0;
 
-  while (chunks < chunkSize && benchPoint < BENCH_SWEEP_POINTS) {
-    const uint32_t k = (uint32_t)benchPoint * 100000U + benchIterInPoint;
-    stgs.max_iter = benchIterSweep[benchPoint];
+  while (chunks < chunkSize && benchHPoint < BENCH_H_SWEEP_POINTS) {
+    const int effH = benchHSweep[benchHPoint];
+    if (effH > NHORIZON) {
+      benchHPoint++;
+      benchIPoint = 0;
+      benchIterInPoint = 0;
+      continue;
+    }
 
-    for (int i = 0; i < NHORIZON; ++i) {
+    const uint32_t k = (uint32_t)(benchHPoint * 100000 + benchIPoint * 10000) + benchIterInPoint;
+    stgs.max_iter = benchIterSweep[benchIPoint];
+    model.nhorizon = effH;
+
+    for (int i = 0; i < effH; ++i) {
       const float t = (float)(k + (uint32_t)i) * DT;
 
       Xref[i].setZero();
@@ -224,7 +236,7 @@ static void runSyntheticBenchmarkChunk(const uint32_t chunkSize) {
       Xref[i](8) = 0.15f * 0.7f * cosf(0.7f * t);
       Xref[i](11) = 0.2f * sinf(0.5f * t);
 
-      if (i < NHORIZON - 1) {
+      if (i < effH - 1) {
         Uref[i].setZero();
       }
     }
@@ -246,76 +258,82 @@ static void runSyntheticBenchmarkChunk(const uint32_t chunkSize) {
     tiny_SolveAdmm(&work);
     const uint32_t dt_us = usecTimestamp() - t0;
 
-    if (dt_us < benchMinUs[benchPoint]) {
-      benchMinUs[benchPoint] = dt_us;
+    if (dt_us < benchMinUs[benchHPoint][benchIPoint]) {
+      benchMinUs[benchHPoint][benchIPoint] = dt_us;
     }
-    if (dt_us > benchMaxUs[benchPoint]) {
-      benchMaxUs[benchPoint] = dt_us;
+    if (dt_us > benchMaxUs[benchHPoint][benchIPoint]) {
+      benchMaxUs[benchHPoint][benchIPoint] = dt_us;
     }
-    benchSumUs[benchPoint] += dt_us;
+    benchSumUs[benchHPoint][benchIPoint] += dt_us;
     if (dt_us > budget_us) {
-      benchMisses[benchPoint]++;
+      benchMisses[benchHPoint][benchIPoint]++;
     }
     if (info.status_val == TINY_SOLVED) {
-      benchSolved[benchPoint]++;
+      benchSolved[benchHPoint][benchIPoint]++;
     } else if (info.status_val == TINY_MAX_ITER_REACHED) {
-      benchMaxIterReached[benchPoint]++;
+      benchMaxIterReached[benchHPoint][benchIPoint]++;
     } else if (info.status_val == TINY_NON_CVX) {
-      benchNonCvx[benchPoint]++;
+      benchNonCvx[benchHPoint][benchIPoint]++;
     } else {
-      benchOtherStatus[benchPoint]++;
+      benchOtherStatus[benchHPoint][benchIPoint]++;
     }
 
     benchIterInPoint++;
     chunks++;
 
     if (BENCH_PROGRESS_EVERY > 0 && (benchIterInPoint % BENCH_PROGRESS_EVERY) == 0) {
-      DEBUG_PRINT("BENCH progress: point=%d/%d iter=%d done=%lu/%d\n",
-                  benchPoint + 1, BENCH_SWEEP_POINTS, stgs.max_iter,
+      DEBUG_PRINT("BENCH progress: hidx=%d/%d H=%d iidx=%d/%d iter=%d done=%lu/%d\n",
+                  benchHPoint + 1, BENCH_H_SWEEP_POINTS, effH,
+                  benchIPoint + 1, BENCH_I_SWEEP_POINTS, stgs.max_iter,
                   (unsigned long)benchIterInPoint, BENCH_SOLVES_PER_POINT);
     }
 
     if (benchIterInPoint >= BENCH_SOLVES_PER_POINT) {
-      const uint32_t avg_us = (uint32_t)(benchSumUs[benchPoint] / BENCH_SOLVES_PER_POINT);
-      DEBUG_PRINT("BENCH point: H=%d iter=%d us[min/avg/max]=%lu/%lu/%lu miss=%lu/%d\n",
-                  NHORIZON, benchIterSweep[benchPoint],
-                  (unsigned long)benchMinUs[benchPoint], (unsigned long)avg_us, (unsigned long)benchMaxUs[benchPoint],
-                  (unsigned long)benchMisses[benchPoint], BENCH_SOLVES_PER_POINT);
-      DEBUG_PRINT("BENCH status: solved=%lu max_iter=%lu noncvx=%lu other=%lu\n",
-                  (unsigned long)benchSolved[benchPoint], (unsigned long)benchMaxIterReached[benchPoint],
-                  (unsigned long)benchNonCvx[benchPoint], (unsigned long)benchOtherStatus[benchPoint]);
+      const uint32_t avg_us = (uint32_t)(benchSumUs[benchHPoint][benchIPoint] / BENCH_SOLVES_PER_POINT);
+      DEBUG_PRINT("BENCH_CSV,%d,%d,%lu,%lu,%lu,%lu,%d,%lu,%lu,%lu,%lu\n",
+                  effH, benchIterSweep[benchIPoint],
+                  (unsigned long)benchMinUs[benchHPoint][benchIPoint],
+                  (unsigned long)avg_us,
+                  (unsigned long)benchMaxUs[benchHPoint][benchIPoint],
+                  (unsigned long)benchMisses[benchHPoint][benchIPoint],
+                  BENCH_SOLVES_PER_POINT,
+                  (unsigned long)benchSolved[benchHPoint][benchIPoint],
+                  (unsigned long)benchMaxIterReached[benchHPoint][benchIPoint],
+                  (unsigned long)benchNonCvx[benchHPoint][benchIPoint],
+                  (unsigned long)benchOtherStatus[benchHPoint][benchIPoint]);
 
-      benchPoint++;
+      benchIPoint++;
       benchIterInPoint = 0;
+      if (benchIPoint >= BENCH_I_SWEEP_POINTS) {
+        double sum_x = 0.0;
+        double sum_y = 0.0;
+        double sum_xx = 0.0;
+        double sum_xy = 0.0;
+        for (int p = 0; p < BENCH_I_SWEEP_POINTS; ++p) {
+          const double x = (double)benchIterSweep[p];
+          const double y = (double)(benchSumUs[benchHPoint][p] / BENCH_SOLVES_PER_POINT);
+          sum_x += x;
+          sum_y += y;
+          sum_xx += x * x;
+          sum_xy += x * y;
+        }
+        const double n = (double)BENCH_I_SWEEP_POINTS;
+        const double denom = n * sum_xx - sum_x * sum_x;
+        double k_iter = 0.0;
+        double t0 = 0.0;
+        if (fabs(denom) > 1e-9) {
+          k_iter = (n * sum_xy - sum_x * sum_y) / denom;
+          t0 = (sum_y - k_iter * sum_x) / n;
+        }
+        DEBUG_PRINT("BENCH_FIT_CSV,%d,%.3f,%.3f,%.6f\n",
+                    effH, t0, k_iter, k_iter / (double)effH);
+        benchHPoint++;
+        benchIPoint = 0;
+      }
     }
   }
 
-  if (benchPoint >= BENCH_SWEEP_POINTS) {
-    // Least-squares fit: T_us(iter) = T0 + k_iter * iter, at current NHORIZON.
-    double sum_x = 0.0;
-    double sum_y = 0.0;
-    double sum_xx = 0.0;
-    double sum_xy = 0.0;
-    for (int p = 0; p < BENCH_SWEEP_POINTS; ++p) {
-      const double x = (double)benchIterSweep[p];
-      const double y = (double)(benchSumUs[p] / BENCH_SOLVES_PER_POINT);
-      sum_x += x;
-      sum_y += y;
-      sum_xx += x * x;
-      sum_xy += x * y;
-    }
-    const double n = (double)BENCH_SWEEP_POINTS;
-    const double denom = n * sum_xx - sum_x * sum_x;
-    double k_iter = 0.0;
-    double t0 = 0.0;
-    if (fabs(denom) > 1e-9) {
-      k_iter = (n * sum_xy - sum_x * sum_y) / denom;
-      t0 = (sum_y - k_iter * sum_x) / n;
-    }
-
-    DEBUG_PRINT("BENCH fit: T_us ~= T0 + k_iter*iter @H=%d\n", NHORIZON);
-    DEBUG_PRINT("BENCH fit: T0=%.1f us, k_iter=%.1f us/iter\n", t0, k_iter);
-    DEBUG_PRINT("BENCH fit: k_step_iter=%.3f us/(iter*step)\n", k_iter / (double)NHORIZON);
+  if (benchHPoint >= BENCH_H_SWEEP_POINTS) {
     benchDone = true;
   }
 }
@@ -459,19 +477,24 @@ void controllerOutOfTreeInit(void) {
 #if TINYMPC_BENCH_ONLY
   benchRequested = true;
   benchDone = false;
-  benchPoint = 0;
+  benchHPoint = 0;
+  benchIPoint = 0;
   benchIterInPoint = 0;
-  for (int p = 0; p < BENCH_SWEEP_POINTS; ++p) {
-    benchMinUs[p] = 0xFFFFFFFFU;
-    benchMaxUs[p] = 0U;
-    benchSumUs[p] = 0U;
-    benchMisses[p] = 0U;
-    benchSolved[p] = 0U;
-    benchMaxIterReached[p] = 0U;
-    benchNonCvx[p] = 0U;
-    benchOtherStatus[p] = 0U;
+  for (int h = 0; h < BENCH_H_SWEEP_POINTS; ++h) {
+    for (int p = 0; p < BENCH_I_SWEEP_POINTS; ++p) {
+      benchMinUs[h][p] = 0xFFFFFFFFU;
+      benchMaxUs[h][p] = 0U;
+      benchSumUs[h][p] = 0U;
+      benchMisses[h][p] = 0U;
+      benchSolved[h][p] = 0U;
+      benchMaxIterReached[h][p] = 0U;
+      benchNonCvx[h][p] = 0U;
+      benchOtherStatus[h][p] = 0U;
+    }
   }
   DEBUG_PRINT("BENCH_ONLY mode active: motors forced off in controllerOutOfTree()\n");
+  DEBUG_PRINT("CSV header: BENCH_CSV,H,iter,min_us,avg_us,max_us,misses,total,solved,max_iter,noncvx,other\n");
+  DEBUG_PRINT("CSV header: BENCH_FIT_CSV,H,T0_us,k_iter_us_per_iter,k_step_iter_us_per_iter_step\n");
 #else
   DEBUG_PRINT("Straight line trajectory (1m forward)\n");
 #endif
