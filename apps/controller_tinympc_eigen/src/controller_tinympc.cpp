@@ -87,7 +87,7 @@ static inline struct vec quat2rp(struct quat q) {
 #define BENCH_CHUNK_SIZE 1
 #define BENCH_CHUNK_DELAY_MS 200
 #define BENCH_PROGRESS_EVERY 0
-#define BENCH_H_SWEEP_POINTS 4
+#define BENCH_H_SWEEP_POINTS 8
 #define BENCH_I_SWEEP_POINTS 8
 
 static bool benchRequested;
@@ -111,7 +111,7 @@ void appMain() {
 
 // Macro variables - define locally to avoid dependency issues
 #define DT 0.002f       // dt
-#define NHORIZON 50     // horizon steps (must match constants.h if used)
+#define NHORIZON 80     // horizon steps (must match constants.h if used)
 #define MPC_RATE RATE_100_HZ  // control frequency
 #define LQR_RATE RATE_500_HZ  // control frequency
 
@@ -191,8 +191,8 @@ static struct vec phi;
 
 // Basic mode - no obstacle avoidance constraints
 
-static const int benchHSweep[BENCH_H_SWEEP_POINTS] = {10, 20, 30, 40};
-static const int benchIterSweep[BENCH_I_SWEEP_POINTS] = {1, 2, 4, 7, 10, 14, 20, 28};
+static const int benchHSweep[BENCH_H_SWEEP_POINTS] = {10, 20, 30, 40, 50, 60, 70, 80};
+static const int benchIterSweep[BENCH_I_SWEEP_POINTS] = {1, 2, 5, 10, 15, 20, 25, 30};
 
 static int benchHPoint = 0;
 static int benchIPoint = 0;

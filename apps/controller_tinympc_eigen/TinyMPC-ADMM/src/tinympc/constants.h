@@ -6,7 +6,7 @@
 ******************/
 # define NSTATES 12
 # define NINPUTS 4
-# define NHORIZON 50
+# define NHORIZON 80
 
 /************************************
 * Printing Constants to set Layout *
