@@ -94,7 +94,7 @@ void appMain() {
 #define LQR_RATE RATE_500_HZ  // control frequency
 
 /* Include trajectory to track */
-#include "traj_fig8_12.h"
+#include "traj_fpga_100hz.h"
 // #include "traj_circle_500hz.h"  // Large circle (1m radius)
 // #include "traj_circle_small.h"  // Small circle (0.5m radius)
 // #include "traj_perching.h"
