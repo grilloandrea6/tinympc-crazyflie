@@ -39,6 +39,8 @@ extern "C" {
 #include <string.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <limits.h>
+#include <math.h>
 
 #include "app.h"
 #include "config.h"
@@ -166,6 +168,18 @@ static uint32_t traj_idx = 0;
 static struct vec desired_rpy;
 static struct quat attitude;
 static struct vec phi;
+static int16_t loggedU16[4] = {0, 0, 0, 0};
+
+static int16_t floatToInt16Saturated(const float value) {
+  const float scaled = value * 32767.0f;
+  if (scaled > 32767.0f) {
+    return INT16_MAX;
+  }
+  if (scaled < -32768.0f) {
+    return INT16_MIN;
+  }
+  return (int16_t)lrintf(scaled);
+}
 
 // Basic mode - no obstacle avoidance constraints
 
@@ -192,16 +206,19 @@ void updateInitialState(const sensorData_t *sensors, const state_t *state) {
   x0(4) = phi.y;
   x0(5) = phi.z;
 }
-
 void updateHorizonReference(const setpoint_t *setpoint) {
   // Update reference: from stored trajectory or commander
   if (en_traj) {
     if (step % traj_hold == 0) {
       traj_idx = (int)(step / traj_hold);
       for (int i = 0; i < NHORIZON; ++i) {
-        for (int j = 0; j < NSTATES; ++j) {
-          Xref[i](j) = X_ref_data[traj_idx][j];
-        }
+        const float offset[3] = {0.45f, -0.55f, 0.4f};
+
+for (int j = 0; j < NSTATES; ++j) {
+    float off = (j < 3) ? offset[j] : 0.0f;
+    Xref[i](j) = X_ref_data[traj_idx][j] + off;
+}
+
         if (i < NHORIZON - 1) {
           for (int j = 0; j < NINPUTS; ++j) {
             Uref[i](j) = U_ref_data[traj_idx][j];
@@ -368,6 +385,10 @@ void controllerOutOfTree(control_t *control, const setpoint_t *setpoint, const s
     control->normalizedForces[2] = ZU_new[0](2) + u_hover[2];
     control->normalizedForces[3] = ZU_new[0](3) + u_hover[3];
   }
+  loggedU16[0] = floatToInt16Saturated(control->normalizedForces[0]);
+  loggedU16[1] = floatToInt16Saturated(control->normalizedForces[1]);
+  loggedU16[2] = floatToInt16Saturated(control->normalizedForces[2]);
+  loggedU16[3] = floatToInt16Saturated(control->normalizedForces[3]);
   control->controlMode = controlModePWM;
   // DEBUG_PRINT("pwm = [%.2f, %.2f]\n", (double)(control->normalizedForces[0]), (double)(control->normalizedForces[1]));
 
@@ -393,25 +414,33 @@ void controllerOutOfTree(control_t *control, const setpoint_t *setpoint, const s
  * MPC controller
  */
 
-// Note: LOG macros disabled due to C++ string literal compatibility with new firmware
-/*
-LOG_GROUP_START(ctrlMPC)
+// Local C++-safe wrappers for LOG macros (log.h uses char* for names).
+#ifdef __cplusplus
+#define LOG_ADD_CPP(TYPE, NAME, ADDRESS) \
+   { .type = TYPE, .name = (char*)#NAME, .address = (void*)(ADDRESS), },
 
-LOG_ADD(LOG_INT8, result, &result)
-LOG_ADD(LOG_UINT32, mpcTime, &mpcTime)
+#define LOG_ADD_GROUP_CPP(TYPE, NAME, ADDRESS) \
+   { .type = TYPE, .name = (char*)#NAME, .address = (void*)(ADDRESS), },
 
-LOG_ADD(LOG_FLOAT, u0, &(Uhrz[0](0)))
-LOG_ADD(LOG_FLOAT, u1, &(Uhrz[0](1)))
-LOG_ADD(LOG_FLOAT, u2, &(Uhrz[0](2)))
-LOG_ADD(LOG_FLOAT, u3, &(Uhrz[0](3)))
+#define LOG_GROUP_START_CPP(NAME)  \
+  static const struct log_s __logs_##NAME[] __attribute__((section(".log." #NAME), used)) = { \
+  LOG_ADD_GROUP_CPP(LOG_GROUP | LOG_START, NAME, 0x0)
 
-LOG_ADD(LOG_FLOAT, zu0, &(ZU_new[0](0)))
-LOG_ADD(LOG_FLOAT, zu1, &(ZU_new[0](1)))
-LOG_ADD(LOG_FLOAT, zu2, &(ZU_new[0](2)))
-LOG_ADD(LOG_FLOAT, zu3, &(ZU_new[0](3)))
+#define LOG_GROUP_STOP_CPP(NAME) \
+  LOG_ADD_GROUP_CPP(LOG_GROUP | LOG_STOP, stop_##NAME, 0x0) \
+  };
+#else
+#define LOG_ADD_CPP(TYPE, NAME, ADDRESS) LOG_ADD(TYPE, NAME, ADDRESS)
+#define LOG_GROUP_START_CPP(NAME) LOG_GROUP_START(NAME)
+#define LOG_GROUP_STOP_CPP(NAME) LOG_GROUP_STOP(NAME)
+#endif
 
-LOG_GROUP_STOP(ctrlMPC)
-*/
+LOG_GROUP_START_CPP(fpga)
+LOG_ADD_CPP(LOG_INT16, u1_16, &loggedU16[0])
+LOG_ADD_CPP(LOG_INT16, u2_16, &loggedU16[1])
+LOG_ADD_CPP(LOG_INT16, u3_16, &loggedU16[2])
+LOG_ADD_CPP(LOG_INT16, u4_16, &loggedU16[3])
+LOG_GROUP_STOP_CPP(fpga)
 
 #ifdef __cplusplus
 }
