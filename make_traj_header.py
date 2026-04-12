@@ -35,8 +35,8 @@ def main():
     #     print("Usage: make_traj_header.py <input.h> <output.h>")
     #     sys.exit(1)
 
-    input_path =  Path("./trajectory_fpga.h") #Path(sys.argv[1])
-    output_path = Path("./apps/controller_tinympc_eigen/src/traj_fpga_100hz.h") # Path(sys.argv[2])
+    input_path =  Path("/home/andrea/tinympc-crazyflie/trajectory_fpga.h") #Path(sys.argv[1])
+    output_path = Path("/home/andrea/tinympc-crazyflie/apps/controller_tinympc_eigen/src/traj_fpga_100hz.h") # Path(sys.argv[2])
 
     packed = parse_packed_rows(input_path.read_text())
 
@@ -44,8 +44,8 @@ def main():
     u_rows = [r[12:] for r in packed]
 
     # 50 Hz -> 100 Hz by duplicating each sample once.
-    x_out = [row for r in x_rows for row in (r, r)]
-    u_out = [row for r in u_rows for row in (r, r)]
+    x_out = [r for r in x_rows] # for row in (r, r, r, r, r, r, r, r, r, r)]
+    u_out = [r for r in u_rows] # for row in (r, r, r, r, r, r, r, r, r, r)]
     u_out = u_out[: len(x_out) - 1]
 
     lines = []

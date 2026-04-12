@@ -91,9 +91,8 @@ void appMain() {
 
 // Macro variables - define locally to avoid dependency issues
 #define DT 0.002f       // dt
-#define NHORIZON 25     // horizon steps (must match constants.h if used)
-#define MPC_RATE RATE_100_HZ  // control frequency
-#define LQR_RATE RATE_500_HZ  // control frequency
+#define NHORIZON 15     // horizon steps (must match constants.h if used)
+#define MPC_RATE RATE_500_HZ  // control frequency
 
 /* Include trajectory to track */
 #include "traj_fpga_100hz.h"
@@ -154,14 +153,14 @@ static tiny_AdmmWorkspace work;
 static uint64_t startTimestamp;
 // static bool isInit = false;  // fix for tracking problem - UNUSED, commented out
 // static uint32_t mpcTime = 0;  // UNUSED (was for logging), commented out
-static float u_hover[4] = {0.7f, 0.663f, 0.7373f, 0.633f};  // cf1
+static float u_hover[4] = {0.6f, 0.6f, 0.6f, 0.6f};  // cf1
 // static float u_hover[4] = {0.7467, 0.667f, 0.78, 0.7f};  // cf2 not correct
 static int8_t result = 0;
 static uint32_t step = 0;
 static bool en_traj = true;
 static uint32_t traj_length = T_ARRAY_SIZE(X_ref_data);
 //static int8_t user_traj_iter = 1;  // number of times to execute full trajectory
-static int8_t traj_hold = 1;       // hold current trajectory for this no of steps
+static int8_t traj_hold = 7;       // hold current trajectory for this no of steps
 static int8_t traj_iter = 0;
 static uint32_t traj_idx = 0;
 
@@ -212,14 +211,24 @@ void updateHorizonReference(const setpoint_t *setpoint) {
     if (step % traj_hold == 0) {
       traj_idx = (int)(step / traj_hold);
       for (int i = 0; i < NHORIZON; ++i) {
-        const float offset[3] = {0.45f, -0.55f, 0.4f};
+        uint32_t ref_idx = (step + (uint32_t)i) / traj_hold;
+        if (ref_idx >= traj_length) {
+          ref_idx = traj_length - 1;
+        }
+        for (int j = 0; j < NSTATES; ++j) {
+          Xref[i](j) = X_ref_data[ref_idx][j];
+        }
+        // for(int j = 3; j < NSTATES; j++) {
+        //   Xref[i](j) = 0;
+        // }
+        Xref[i](0) += setpoint->position.x;
+        Xref[i](1) += setpoint->position.y;
+        Xref[i](2) += setpoint->position.z;
 
-for (int j = 0; j < NSTATES; ++j) {
-    float off = (j < 3) ? offset[j] : 0.0f;
-    Xref[i](j) = X_ref_data[traj_idx][j] + off;
-}
 
         if (i < NHORIZON - 1) {
+          // Input variable is delta-thrust; zero reference means hover around u_hover.
+          // Uref[i].setZero();
           for (int j = 0; j < NINPUTS; ++j) {
             Uref[i](j) = U_ref_data[traj_idx][j];
           }          
@@ -227,7 +236,7 @@ for (int j = 0; j < NSTATES; ++j) {
       }
     }
   }
-  else {
+    else {
     xg(0)  = setpoint->position.x;
     xg(1)  = setpoint->position.y;
     xg(2)  = setpoint->position.z;
@@ -270,8 +279,8 @@ void controllerOutOfTreeInit(void) {
   /* Start MPC initialization*/
 
   // Precompute/Cache
-  // #include "params_500hz.h"
-  #include "params_100hz.h"  // Original gains (stable)
+  #include "params_500hz_regenerated.h"
+  // #include "params_100hz.h"  // Original gains (stable)
   // #include "params_constrained.h"
 
   // End of Precompute/Cache
@@ -321,8 +330,6 @@ void controllerOutOfTreeInit(void) {
   /* End of MPC initialization */  
   step = 0;  
   traj_iter = 0;
-  
-  DEBUG_PRINT("Straight line trajectory (1m forward)\n");
 }
 
 bool controllerOutOfTreeTest() {
@@ -353,15 +360,15 @@ void controllerOutOfTree(control_t *control, const setpoint_t *setpoint, const s
     
     // Detailed logging every 0.5 seconds
     static uint32_t mpc_log_counter = 0;
-    if (mpc_log_counter % 50 == 0) {  // 100Hz / 50 = every 0.5s
-      DEBUG_PRINT("MPC: pos=(%.2f,%.2f,%.2f) ref=(%.2f,%.2f,%.2f)\n", 
-                  (double)x0(0), (double)x0(1), (double)x0(2),
-                  (double)Xref[0](0), (double)Xref[0](1), (double)Xref[0](2));
-      DEBUG_PRINT("MPC: u=(%.2f,%.2f,%.2f,%.2f) iter=%d\n",
-                  (double)(Uhrz[0](0) + u_hover[0]), (double)(Uhrz[0](1) + u_hover[1]),
-                  (double)(Uhrz[0](2) + u_hover[2]), (double)(Uhrz[0](3) + u_hover[3]),
-                  info.iter);
-    }
+    // if (mpc_log_counter % 50 == 0) {  // 100Hz / 50 = every 0.5s
+    //   DEBUG_PRINT("MPC: pos=(%.2f,%.2f,%.2f) ref=(%.2f,%.2f,%.2f)\n", 
+    //               (double)x0(0), (double)x0(1), (double)x0(2),
+    //               (double)Xref[0](0), (double)Xref[0](1), (double)Xref[0](2));
+    //   DEBUG_PRINT("MPC: u=(%.2f,%.2f,%.2f,%.2f) iter=%d\n",
+    //               (double)(Uhrz[0](0) + u_hover[0]), (double)(Uhrz[0](1) + u_hover[1]),
+    //               (double)(Uhrz[0](2) + u_hover[2]), (double)(Uhrz[0](3) + u_hover[3]),
+    //               info.iter);
+    // }
     mpc_log_counter++;
     
     // Position logging disabled
